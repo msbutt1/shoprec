@@ -32,7 +32,6 @@ env.bak/
 venv.bak/
 
 # Poetry
-poetry.lock
 .poetry/
 
 # Pip
