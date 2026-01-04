@@ -1,8 +1,6 @@
-"""Inference module for generating product recommendations.
+"""Module for getting recommendations.
 
-This module provides functionality to generate product recommendations using
-a trained collaborative filtering model. It loads model artifacts and computes
-recommendations based on user purchase history and latent feature similarities.
+Uses the trained model to recommend products for users.
 """
 
 import logging
@@ -29,34 +27,9 @@ def recommend_products_for_user(
     top_n: int = DEFAULT_TOP_N,
     user_product_matrix: Optional[csr_matrix] = None,
 ) -> List[int]:
-    """Generate product recommendations for a specific user.
-
-    Uses a trained collaborative filtering model to generate personalized
-    product recommendations. The function loads the model, computes similarity
-    scores for all products, and returns the top-N recommendations.
-
-    Args:
-        user_id: User ID for which to generate recommendations.
-        model_path: Path to directory containing model artifacts
-            (default: "models").
-        top_n: Number of recommendations to return (default: 5).
-        user_product_matrix: Optional pre-loaded user-product interaction matrix.
-            If None, recommendations are based purely on latent features.
-
-    Returns:
-        List of recommended product IDs, sorted by relevance (most relevant first).
-
-    Raises:
-        FileNotFoundError: If model files are not found at model_path.
-        ValueError: If user_id is invalid or model artifacts are corrupted.
-
-    Example:
-        >>> recommendations = recommend_products_for_user(
-        ...     user_id=42,
-        ...     model_path="models",
-        ...     top_n=10
-        ... )
-        >>> print(f"Top 10 products for user 42: {recommendations}")
+    """Get recommendations for a user.
+    
+    Loads the model and returns top N product recommendations.
     """
     logger.info(
         f"Generating {top_n} recommendations for user {user_id} "
@@ -107,79 +80,62 @@ def _compute_recommendations(
     top_n: int,
     user_product_matrix: Optional[csr_matrix] = None,
 ) -> List[int]:
-    """Compute product recommendations for a user using the SVD model.
-
-    This function reconstructs the user-product interaction matrix using the
-    SVD model's latent features and returns the top-N products with highest
-    predicted scores.
-
-    Args:
-        user_idx: Index of the user in the model's user dimension.
-        model: Trained TruncatedSVD model.
-        product_id_to_idx: Mapping from product IDs to matrix indices.
-        top_n: Number of recommendations to return.
-        user_product_matrix: Optional sparse matrix of user-product interactions.
-            Used to filter out already-purchased products.
-
-    Returns:
-        List of recommended product IDs.
+    """Get recommendations for a user using the model.
     """
-    # Get the number of products
     n_products = len(product_id_to_idx)
 
-    # Create a one-hot vector for this user (all zeros except for this user)
+    # Make a vector for this user
     user_vector = np.zeros(n_products)
 
-    # If we have the user-product matrix, use actual interactions
+    # Use actual purchase data if we have it
     if user_product_matrix is not None:
         user_interactions = user_product_matrix[user_idx].toarray().flatten()
         user_vector = user_interactions
     else:
-        # Otherwise, create a simple indicator vector
-        # This is less accurate but works when the original matrix is unavailable
-        logger.debug("Using cold model inference without interaction matrix")
+        logger.debug("Using model without interaction matrix")
 
-    # Transform the user vector to latent space and reconstruct
-    # This gives us predicted scores for all products
+    # Get scores for all products
     if user_product_matrix is not None:
-        # Transform user interactions to latent space
         user_latent = model.transform([user_vector])[0]
-
-        # Reconstruct scores for all products using the latent representation
-        # Score = user_latent · product_latent^T
-        # Since model.components_ contains product latent features (n_components × n_products)
-        # we compute: user_latent · components_
         predicted_scores = np.dot(user_latent, model.components_)
     else:
-        # Without interaction matrix, use simple latent feature similarity
-        # Get average latent features as a baseline
+        # Just use average if no data
         predicted_scores = np.mean(model.components_, axis=0)
 
-    # Create reverse mapping from index to product ID
+    # Map back to product IDs
     idx_to_product_id = {idx: pid for pid, idx in product_id_to_idx.items()}
 
-    # Get products user has already interacted with
+    # Find what user already bought
     purchased_product_indices = set()
     if user_product_matrix is not None:
         purchased_product_indices = set(
             user_product_matrix[user_idx].nonzero()[1].tolist()
         )
 
-    # Filter out already-purchased products by setting their scores to -inf
+    # Don't recommend stuff they already have
     filtered_scores = predicted_scores.copy()
     for purchased_idx in purchased_product_indices:
         filtered_scores[purchased_idx] = -np.inf
 
-    # Get top-N product indices by score
-    top_product_indices = np.argsort(filtered_scores)[::-1][:top_n]
+    # Get valid products
+    valid_indices = np.where(filtered_scores != -np.inf)[0]
+    
+    if len(valid_indices) == 0:
+        logger.warning("No valid products available for recommendation")
+        return []
 
-    # Convert indices back to product IDs
+    # Get top N
+    n_available = min(top_n, len(valid_indices))
+    sorted_indices = np.argsort(filtered_scores[valid_indices])[::-1]
+    top_product_indices = valid_indices[sorted_indices[:n_available]]
+
+    # Convert to product IDs
     recommended_product_ids = [
-        idx_to_product_id[idx] for idx in top_product_indices
+        int(idx_to_product_id[int(idx)]) for idx in top_product_indices
     ]
 
     logger.debug(
-        f"Top {top_n} product indices: {top_product_indices.tolist()}, "
+        f"Top {n_available} product indices: {top_product_indices.tolist()}, "
         f"Product IDs: {recommended_product_ids}"
     )
 
@@ -191,28 +147,17 @@ def _handle_cold_start_user(
     product_id_to_idx: Dict[int, int],
     top_n: int,
 ) -> List[int]:
-    """Handle recommendations for users not in the training data (cold start).
-
-    For new users without purchase history, returns popular products or
-    a default set of recommendations.
-
-    Args:
-        user_id: User ID for cold start recommendations.
-        product_id_to_idx: Mapping from product IDs to matrix indices.
-        top_n: Number of recommendations to return.
-
-    Returns:
-        List of recommended product IDs for cold start users.
+    """Handle new users who aren't in the training data.
+    
+    Just returns the first N products as a simple fallback.
     """
     logger.info(f"Applying cold start strategy for user {user_id}")
 
-    # Get all product IDs
     all_product_ids = sorted(product_id_to_idx.keys())
 
-    # Return top-N products by product ID (simple fallback strategy)
-    # In a production system, this would return popular products
-    # based on global statistics
-    cold_start_recommendations = all_product_ids[:top_n]
+    # Just return first N products
+    n_available = min(top_n, len(all_product_ids))
+    cold_start_recommendations = [int(pid) for pid in all_product_ids[:n_available]]
 
     logger.debug(
         f"Cold start recommendations for user {user_id}: "
@@ -294,4 +239,3 @@ def batch_recommend_for_users(
     logger.info(f"Batch recommendations completed for {len(results)} users")
 
     return results
-

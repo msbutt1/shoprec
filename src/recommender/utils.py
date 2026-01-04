@@ -1,7 +1,6 @@
-"""Utility functions for recommendation system.
+"""Helper functions for the recommendation system.
 
-This module provides helper functions for data loading, model artifact management,
-and common operations used throughout the recommendation system.
+Functions for loading data and saving/loading models.
 """
 
 import logging
@@ -30,40 +29,9 @@ def load_csv_to_matrix(
     value_col: Optional[str] = None,
     binary: bool = True,
 ) -> Tuple[csr_matrix, Dict[int, int], Dict[int, int]]:
-    """Load CSV data and convert to sparse user-item interaction matrix.
-
-    Reads a CSV file containing user-item interactions and constructs a sparse
-    matrix where rows represent users and columns represent items. Supports
-    both binary (purchased/not purchased) and weighted interactions.
-
-    Args:
-        csv_path: Path to CSV file containing interaction data.
-        user_col: Name of the column containing user identifiers.
-        item_col: Name of the column containing item/product identifiers.
-        value_col: Optional name of column containing interaction values.
-            If None and binary=True, uses binary values (1 for interaction).
-            If None and binary=False, counts interactions.
-        binary: If True, creates binary matrix (1 if interaction exists).
-            If False and value_col is None, counts duplicate interactions.
-
-    Returns:
-        A tuple containing:
-            - Sparse CSR matrix of shape (n_users, n_items) with interactions
-            - Dictionary mapping user_id to matrix row index
-            - Dictionary mapping item_id to matrix column index
-
-    Raises:
-        FileNotFoundError: If CSV file does not exist.
-        ValueError: If CSV is missing required columns or is empty.
-
-    Example:
-        >>> matrix, user_map, item_map = load_csv_to_matrix(
-        ...     "data/purchases.csv",
-        ...     user_col="user_id",
-        ...     item_col="product_id"
-        ... )
-        >>> print(f"Matrix shape: {matrix.shape}")
-        >>> print(f"Number of users: {len(user_map)}")
+    """Load CSV and make a user-product matrix.
+    
+    Reads CSV and builds a matrix where rows are users and columns are products.
     """
     csv_file = Path(csv_path)
     if not csv_file.exists():
@@ -147,33 +115,7 @@ def save_model_artifacts(
     user_mapping_filename: str = USER_MAPPING_FILENAME,
     item_mapping_filename: str = PRODUCT_MAPPING_FILENAME,
 ) -> None:
-    """Save trained model and ID mappings to disk.
-
-    Saves the SVD model and user/item ID mappings as separate joblib files
-    in the specified output directory. Creates the directory if it doesn't exist.
-
-    Args:
-        model: Trained TruncatedSVD model to save.
-        user_id_to_idx: Dictionary mapping user IDs to matrix row indices.
-        item_id_to_idx: Dictionary mapping item IDs to matrix column indices.
-        output_dir: Directory path where artifacts will be saved.
-        model_filename: Filename for the model (default: "svd_model.joblib").
-        user_mapping_filename: Filename for user mapping (default: "user_id_mapping.joblib").
-        item_mapping_filename: Filename for item mapping (default: "product_id_mapping.joblib").
-
-    Raises:
-        OSError: If unable to create output directory or save files.
-
-    Example:
-        >>> from sklearn.decomposition import TruncatedSVD
-        >>> model = TruncatedSVD(n_components=30)
-        >>> model.fit(matrix)
-        >>> save_model_artifacts(
-        ...     model,
-        ...     user_map,
-        ...     item_map,
-        ...     "models"
-        ... )
+    """Save the model and mappings to disk.
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -202,30 +144,7 @@ def load_model_artifacts(
     user_mapping_filename: str = USER_MAPPING_FILENAME,
     item_mapping_filename: str = PRODUCT_MAPPING_FILENAME,
 ) -> Tuple[TruncatedSVD, Dict[int, int], Dict[int, int]]:
-    """Load trained model and ID mappings from disk.
-
-    Loads the SVD model and user/item ID mappings from joblib files in the
-    specified directory.
-
-    Args:
-        model_dir: Directory path where artifacts are stored.
-        model_filename: Filename for the model (default: "svd_model.joblib").
-        user_mapping_filename: Filename for user mapping (default: "user_id_mapping.joblib").
-        item_mapping_filename: Filename for item mapping (default: "product_id_mapping.joblib").
-
-    Returns:
-        A tuple containing:
-            - Loaded TruncatedSVD model
-            - Dictionary mapping user IDs to matrix row indices
-            - Dictionary mapping item IDs to matrix column indices
-
-    Raises:
-        FileNotFoundError: If any required artifact file is missing.
-
-    Example:
-        >>> model, user_map, item_map = load_model_artifacts("models")
-        >>> print(f"Model has {model.n_components} components")
-        >>> print(f"Number of users: {len(user_map)}")
+    """Load the model and mappings from disk.
     """
     model_path = Path(model_dir)
 
@@ -305,4 +224,3 @@ def check_model_exists(model_dir: str) -> bool:
         return all(path.exists() for path in [model_path, user_path, item_path])
     except Exception:
         return False
-

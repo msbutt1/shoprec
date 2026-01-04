@@ -1,17 +1,21 @@
-"""Recommendation endpoints for the ShopRec API.
+"""API endpoints for recommendations.
 
-This module provides API endpoints for generating product recommendations
-based on user purchase history and collaborative filtering models.
+Handles requests to get product recommendations.
 """
 
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
+import numpy as np
+
+from src.recommender.infer import _compute_recommendations, _handle_cold_start_user
 from src.recommender.utils import check_model_exists, load_model_artifacts
+from src.recommender.hybrid import create_hybrid_recommender
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -28,14 +32,12 @@ DEFAULT_MODEL_DIR = "models"
 # Cache for loaded model artifacts
 _model_cache: Optional[Dict] = None
 
+# Track when model was last loaded
+_model_load_timestamp: Optional[datetime] = None
+
 
 class RecommendationResponse(BaseModel):
-    """Response model for recommendation requests.
-
-    Attributes:
-        user_id: The user ID for which recommendations were generated.
-        recommendations: List of recommended product IDs.
-        model_version: Version or timestamp of the model used.
+    """Response for recommendation requests.
     """
 
     user_id: int = Field(..., description="User ID for recommendations")
@@ -45,24 +47,15 @@ class RecommendationResponse(BaseModel):
     model_version: str = Field(
         default="0.1.0", description="Model version or timestamp"
     )
+    scores: Optional[Dict] = Field(
+        default=None, description="Score breakdown for explainability (if explain=true)"
+    )
 
 
 def load_model_if_needed(model_dir: str = DEFAULT_MODEL_DIR) -> Dict:
-    """Load model artifacts from disk if not already loaded.
-
-    Uses a module-level cache to avoid reloading the model on every request.
-
-    Args:
-        model_dir: Directory containing model artifacts.
-
-    Returns:
-        Dictionary containing:
-            - model: Trained TruncatedSVD model
-            - user_map: User ID to index mapping
-            - product_map: Product ID to index mapping
-
-    Raises:
-        HTTPException: If model files are not found or cannot be loaded.
+    """Load model if not already loaded.
+    
+    Uses a cache so we don't reload every time.
     """
     global _model_cache
 
@@ -85,11 +78,13 @@ def load_model_if_needed(model_dir: str = DEFAULT_MODEL_DIR) -> Dict:
         model, user_map, product_map = load_model_artifacts(model_dir)
 
         # Cache the loaded model
+        global _model_load_timestamp
         _model_cache = {
             "model": model,
             "user_map": user_map,
             "product_map": product_map,
         }
+        _model_load_timestamp = datetime.utcnow()
 
         logger.info("Model loaded successfully")
         return _model_cache
@@ -107,75 +102,153 @@ def get_recommendations(
     user_id: int,
     top_n: int = 10,
     model_dir: str = DEFAULT_MODEL_DIR,
+    mode: str = "hybrid",
+    explain: bool = False,
+    cf_weight: float = 0.7,
+    content_weight: float = 0.3,
 ) -> RecommendationResponse:
-    """Get product recommendations for a user.
-
-    Generates personalized product recommendations based on the user's
-    purchase history and collaborative filtering model.
-
-    Args:
-        user_id: User ID for which to generate recommendations.
-        top_n: Number of recommendations to return (default: 10).
-        model_dir: Directory containing model artifacts (default: "models").
-
-    Returns:
-        RecommendationResponse containing user_id and list of recommended
-        product IDs.
-
-    Raises:
-        HTTPException: If model is not found or if there's an error generating
-            recommendations.
-
-    Example:
-        GET /recommend/42?top_n=5
-        Returns top 5 product recommendations for user 42.
+    """Get recommendations for a user.
+    
+    Can use hybrid mode (CF + content) or just CF mode.
     """
-    logger.info(f"Generating recommendations for user {user_id}, top_n={top_n}")
+    # Check mode
+    mode = mode.lower() if mode else "hybrid"
+    if mode not in ["hybrid", "cf"]:
+        logger.warning(f"Invalid mode '{mode}', falling back to 'cf'")
+        mode = "cf"
+    
+    logger.info(f"Generating recommendations for user {user_id}, top_n={top_n}, mode={mode}")
 
     try:
-        # Load model artifacts (uses cache if available)
+        # Load the model
         model_artifacts = load_model_if_needed(model_dir)
+        model = model_artifacts["model"]
         user_map = model_artifacts["user_map"]
         product_map = model_artifacts["product_map"]
 
-        # Check if user exists in training data
-        if user_id not in user_map:
-            logger.warning(f"User {user_id} not found in training data")
-            # For now, return dummy recommendations for unknown users
-            # TODO: Implement cold-start strategy for new users
-            dummy_recommendations = list(range(1, min(top_n + 1, 101)))
-            return RecommendationResponse(
-                user_id=user_id,
-                recommendations=dummy_recommendations,
-                model_version="0.1.0",
+        if mode == "hybrid":
+            # Use hybrid mode
+            hybrid_recommender = create_hybrid_recommender(
+                model=model,
+                user_id_to_idx=user_map,
+                product_id_to_idx=product_map,
+                model_dir=model_dir,
+                cf_weight=cf_weight,
+                content_weight=content_weight,
             )
 
-        # TODO: Implement actual recommendation logic using the SVD model
-        # For now, return static dummy product IDs
-        # The real implementation will:
-        # 1. Get user's latent features from the model
-        # 2. Compute similarity scores with all products
-        # 3. Return top-N products the user hasn't purchased yet
+            if explain:
+                recommendations, scores = hybrid_recommender.recommend(
+                    user_id=user_id,
+                    top_n=top_n,
+                    user_product_matrix=None,
+                    return_scores=True,
+                )
+            else:
+                recommendations = hybrid_recommender.recommend(
+                    user_id=user_id,
+                    top_n=top_n,
+                    user_product_matrix=None,
+                    return_scores=False,
+                )
+                scores = None
+        else:
+            # Use CF-only mode
+            logger.debug("Using CF-only recommendation mode")
+            
+            if user_id not in user_map:
+                logger.warning(f"User {user_id} not found in training data. Applying cold-start strategy.")
+                recommendations = _handle_cold_start_user(user_id, product_map, top_n)
+                scores = {"method": "cold_start", "cf_scores": {}, "content_scores": {}} if explain else None
+            else:
+                user_idx = user_map[user_id]
+                recommendations = _compute_recommendations(
+                    user_idx=user_idx,
+                    model=model,
+                    product_id_to_idx=product_map,
+                    top_n=top_n,
+                    user_product_matrix=None,
+                )
+                
+                if explain:
+                    # Get CF scores for explainability
+                    n_products = len(product_map)
+                    predicted_scores = np.mean(model.components_, axis=0)
+                    
+                    if len(predicted_scores) != n_products:
+                        logger.warning(
+                            f"Dimension mismatch: model has {len(predicted_scores)} products, "
+                            f"but product_map has {n_products}. Truncating or padding."
+                        )
+                        if len(predicted_scores) > n_products:
+                            predicted_scores = predicted_scores[:n_products]
+                        else:
+                            padding = np.zeros(n_products - len(predicted_scores))
+                            predicted_scores = np.concatenate([predicted_scores, padding])
+                    
+                    idx_to_product_id = {idx: pid for pid, idx in product_map.items()}
+                    cf_scores = {
+                        int(idx_to_product_id[idx]): float(predicted_scores[idx])
+                        for idx in range(n_products)
+                        if idx in idx_to_product_id
+                    }
+                    
+                    # Normalize
+                    if cf_scores:
+                        min_score = min(cf_scores.values())
+                        max_score = max(cf_scores.values())
+                        if max_score != min_score:
+                            cf_scores = {
+                                pid: (score - min_score) / (max_score - min_score)
+                                for pid, score in cf_scores.items()
+                            }
+                    
+                    scores = {
+                        "method": "cf_only",
+                        "cf_scores": {pid: cf_scores.get(pid, 0.0) for pid in recommendations},
+                        "content_scores": {},
+                        "hybrid_scores": {pid: cf_scores.get(pid, 0.0) for pid in recommendations},
+                        "cf_weight": 1.0,
+                        "content_weight": 0.0,
+                    }
+                else:
+                    scores = None
 
-        # Get all product IDs from the training data
-        all_product_ids = list(product_map.keys())
-
-        # Return top_n products as dummy recommendations
-        dummy_recommendations = all_product_ids[:top_n]
+        # Handle case where user is not found (cold start)
+        if not recommendations:
+            logger.warning(
+                f"No recommendations generated for user {user_id}. "
+                "This may indicate the user is not in training data."
+            )
+            # Return empty list rather than error - cold start handled by inference module
+            recommendations = []
 
         logger.info(
-            f"Generated {len(dummy_recommendations)} recommendations for user {user_id}"
+            f"Generated {len(recommendations)} recommendations for user {user_id}"
         )
 
         return RecommendationResponse(
             user_id=user_id,
-            recommendations=dummy_recommendations,
+            recommendations=recommendations,
             model_version="0.1.0",
+            scores=scores if explain else None,
         )
 
     except HTTPException:
         # Re-raise HTTP exceptions as-is
         raise
+    except FileNotFoundError as e:
+        logger.error(f"Model files not found: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Model not found in {model_dir}. Please train a model first.",
+        )
+    except ValueError as e:
+        logger.error(f"Invalid input or model error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid request: {str(e)}",
+        )
     except Exception as e:
         logger.error(
             f"Error generating recommendations for user {user_id}: {e}",
@@ -190,24 +263,14 @@ def get_recommendations(
 @router.post("/reload-model")
 def reload_model(model_dir: str = DEFAULT_MODEL_DIR) -> Dict[str, str]:
     """Reload the model from disk.
-
-    Forces reloading of model artifacts, clearing the cache. Useful when
-    a new model has been trained and needs to be loaded without restarting
-    the server.
-
-    Args:
-        model_dir: Directory containing model artifacts.
-
-    Returns:
-        Dictionary with status message.
-
-    Raises:
-        HTTPException: If model cannot be reloaded.
+    
+    Clears the cache and loads fresh model files.
     """
-    global _model_cache
+    global _model_cache, _model_load_timestamp
 
     logger.info("Reloading model...")
     _model_cache = None  # Clear cache
+    _model_load_timestamp = None
 
     try:
         load_model_if_needed(model_dir)
@@ -221,3 +284,29 @@ def reload_model(model_dir: str = DEFAULT_MODEL_DIR) -> Dict[str, str]:
             detail=f"Failed to reload model: {str(e)}",
         )
 
+
+def get_model_status(model_dir: str = DEFAULT_MODEL_DIR) -> Dict:
+    """Get model status info.
+    
+    Returns whether model is loaded, when it was loaded, and counts.
+    """
+    global _model_cache, _model_load_timestamp
+
+    model_loaded = _model_cache is not None
+    timestamp_last_loaded = (
+        _model_load_timestamp.isoformat() + "Z" if _model_load_timestamp else None
+    )
+
+    num_users = 0
+    num_products = 0
+
+    if model_loaded and _model_cache is not None:
+        num_users = len(_model_cache.get("user_map", {}))
+        num_products = len(_model_cache.get("product_map", {}))
+
+    return {
+        "model_loaded": model_loaded,
+        "timestamp_last_loaded": timestamp_last_loaded,
+        "num_users": num_users,
+        "num_products": num_products,
+    }
