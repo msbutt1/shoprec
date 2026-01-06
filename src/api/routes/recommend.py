@@ -4,6 +4,7 @@ Handles requests to get product recommendations.
 """
 
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -13,6 +14,7 @@ from pydantic import BaseModel, Field
 
 import numpy as np
 
+from src.api.metrics import metrics_service
 from src.recommender.infer import _compute_recommendations, _handle_cold_start_user
 from src.recommender.utils import check_model_exists, load_model_artifacts
 from src.recommender.hybrid import create_hybrid_recommender
@@ -118,6 +120,9 @@ def get_recommendations(
         mode = "cf"
     
     logger.info(f"Generating recommendations for user {user_id}, top_n={top_n}, mode={mode}")
+
+    # Track timing for metrics
+    inference_start = time.time()
 
     try:
         # Load the model
@@ -226,6 +231,10 @@ def get_recommendations(
         logger.info(
             f"Generated {len(recommendations)} recommendations for user {user_id}"
         )
+
+        # Record metrics
+        inference_latency_ms = (time.time() - inference_start) * 1000
+        metrics_service.record_inference(inference_latency_ms)
 
         return RecommendationResponse(
             user_id=user_id,

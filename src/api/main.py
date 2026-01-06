@@ -11,6 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from src.api.logging_config import RequestLoggingMiddleware, setup_logging
+from src.api.metrics import metrics_service
 from src.api.routes import recommend
 from src.api.routes.recommend import get_model_status
 
@@ -110,6 +111,20 @@ def get_status() -> Dict:
     Returns if model is loaded, when it was loaded, and counts.
     """
     return get_model_status()
+
+
+@app.get("/metrics")
+def get_metrics() -> Dict:
+    """Get API performance metrics.
+    
+    Returns:
+        Dictionary with metrics:
+        - inference_count: Total number of inference calls served
+        - average_latency_ms: Average latency in milliseconds
+        - min_latency_ms: Minimum latency observed
+        - max_latency_ms: Maximum latency observed
+    """
+    return metrics_service.get_metrics()
 
 
 if __name__ == "__main__":
