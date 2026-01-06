@@ -31,18 +31,44 @@ def recommend_products_for_user(
     
     Loads the model and returns top N product recommendations.
     """
+    import time
+    
+    start_time = time.time()
+    
     logger.info(
-        f"Generating {top_n} recommendations for user {user_id} "
-        f"using model from {model_path}"
+        "Starting recommendation generation",
+        extra={
+            "user_id": user_id,
+            "top_n": top_n,
+            "model_path": model_path,
+        }
     )
 
     try:
         # Load model artifacts
+        load_start = time.time()
         model, user_id_to_idx, product_id_to_idx = load_model_artifacts(model_path)
+        load_time = time.time() - load_start
+        
+        logger.info(
+            "Model loaded",
+            extra={
+                "user_id": user_id,
+                "load_time_ms": round(load_time * 1000, 2),
+                "num_users": len(user_id_to_idx),
+                "num_products": len(product_id_to_idx),
+            }
+        )
 
         # Handle unknown user
         if user_id not in user_id_to_idx:
-            logger.warning(f"User {user_id} not found in training data")
+            logger.warning(
+                "User not in training data, using cold-start",
+                extra={
+                    "user_id": user_id,
+                    "strategy": "cold_start",
+                }
+            )
             return _handle_cold_start_user(
                 user_id, product_id_to_idx, top_n
             )
@@ -51,6 +77,7 @@ def recommend_products_for_user(
         user_idx = user_id_to_idx[user_id]
 
         # Generate recommendations
+        scoring_start = time.time()
         recommendations = _compute_recommendations(
             user_idx=user_idx,
             model=model,
@@ -58,18 +85,42 @@ def recommend_products_for_user(
             top_n=top_n,
             user_product_matrix=user_product_matrix,
         )
+        scoring_time = time.time() - scoring_start
+        total_time = time.time() - start_time
 
         logger.info(
-            f"Generated {len(recommendations)} recommendations for user {user_id}"
+            "Recommendations generated",
+            extra={
+                "user_id": user_id,
+                "num_recommendations": len(recommendations),
+                "scoring_time_ms": round(scoring_time * 1000, 2),
+                "total_time_ms": round(total_time * 1000, 2),
+            }
         )
 
         return recommendations
 
     except FileNotFoundError as e:
-        logger.error(f"Model files not found: {e}")
+        logger.error(
+            "Model files not found",
+            extra={
+                "user_id": user_id,
+                "model_path": model_path,
+                "error": str(e),
+            }
+        )
         raise
     except Exception as e:
-        logger.error(f"Error generating recommendations for user {user_id}: {e}")
+        total_time = time.time() - start_time
+        logger.error(
+            "Recommendation generation failed",
+            extra={
+                "user_id": user_id,
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "total_time_ms": round(total_time * 1000, 2),
+            }
+        )
         raise ValueError(f"Failed to generate recommendations: {e}") from e
 
 
@@ -82,6 +133,9 @@ def _compute_recommendations(
 ) -> List[int]:
     """Get recommendations for a user using the model.
     """
+    import time
+    
+    start_time = time.time()
     n_products = len(product_id_to_idx)
 
     # Make a vector for this user
@@ -133,10 +187,16 @@ def _compute_recommendations(
     recommended_product_ids = [
         int(idx_to_product_id[int(idx)]) for idx in top_product_indices
     ]
+    
+    compute_time = time.time() - start_time
 
     logger.debug(
-        f"Top {n_available} product indices: {top_product_indices.tolist()}, "
-        f"Product IDs: {recommended_product_ids}"
+        "Computed recommendations",
+        extra={
+            "user_idx": user_idx,
+            "num_recommendations": len(recommended_product_ids),
+            "compute_time_ms": round(compute_time * 1000, 2),
+        }
     )
 
     return recommended_product_ids

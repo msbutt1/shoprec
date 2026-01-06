@@ -147,7 +147,18 @@ class HybridRecommender:
         
         Combines CF and content scores.
         """
-        logger.info(f"Generating hybrid recommendations for user {user_id}, top_n={top_n}")
+        import time
+        
+        start_time = time.time()
+        logger.info(
+            "Starting hybrid recommendation",
+            extra={
+                "user_id": user_id,
+                "top_n": top_n,
+                "cf_weight": self.cf_weight,
+                "content_weight": self.content_weight,
+            }
+        )
         
         # Check if user exists
         user_known = user_id in self.user_id_to_idx
@@ -164,7 +175,10 @@ class HybridRecommender:
 
         # Handle new users
         if not user_known:
-            logger.info(f"User {user_id} not found, using cold-start")
+            logger.info(
+                "User not in training data",
+                extra={"user_id": user_id, "strategy": "cold_start"}
+            )
             recommendations = _handle_cold_start_user(
                 user_id, self.product_id_to_idx, top_n
             )
@@ -173,12 +187,28 @@ class HybridRecommender:
             return recommendations
 
         # Get scores from both methods
+        cf_start = time.time()
         cf_scores = self._get_cf_scores(user_id, user_product_matrix)
+        cf_time = time.time() - cf_start
+        
+        content_start = time.time()
         content_scores = self._get_content_scores(user_id, purchased_product_ids)
+        content_time = time.time() - content_start
 
         # Normalize them
         cf_scores_norm = self._normalize_scores(cf_scores)
         content_scores_norm = self._normalize_scores(content_scores)
+        
+        logger.debug(
+            "Scores computed",
+            extra={
+                "user_id": user_id,
+                "cf_time_ms": round(cf_time * 1000, 2),
+                "content_time_ms": round(content_time * 1000, 2),
+                "num_cf_scores": len(cf_scores),
+                "num_content_scores": len(content_scores),
+            }
+        )
 
         # Combine the scores
         all_product_ids = set(cf_scores_norm.keys()) | set(content_scores_norm.keys())
@@ -223,8 +253,17 @@ class HybridRecommender:
         )
 
         recommendations = [int(pid) for pid, _ in sorted_products[:top_n]]
+        
+        total_time = time.time() - start_time
 
-        logger.info(f"Generated {len(recommendations)} hybrid recommendations for user {user_id}")
+        logger.info(
+            "Hybrid recommendations generated",
+            extra={
+                "user_id": user_id,
+                "num_recommendations": len(recommendations),
+                "total_time_ms": round(total_time * 1000, 2),
+            }
+        )
 
         if return_scores:
             score_breakdown = {
