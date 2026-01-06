@@ -1,8 +1,0 @@
-Placeholder for notebook screenshot.
-
-To add your notebook output screenshot:
-1. Run the notebook: jupyter notebook notebooks/explore.ipynb
-2. Take a screenshot of the visualizations
-3. Save it as docs/notebook_example.png
-4. The README will automatically display it
-

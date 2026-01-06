@@ -4,16 +4,17 @@ Sets up the API server and endpoints.
 """
 
 import logging
+import traceback
 from typing import Dict
 
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from src.api.logging_config import RequestLoggingMiddleware, setup_logging
 from src.api.metrics import metrics_service
 from src.api.routes import recommend
-from src.api.routes.recommend import get_model_status
+from src.api.routes.recommend import get_model_status, ModelNotFoundError, UserNotFoundError
 
 # Setup structured logging
 setup_logging(log_level="INFO")
@@ -35,10 +36,101 @@ app.add_middleware(RequestLoggingMiddleware)
 app.include_router(recommend.router)
 
 
+@app.exception_handler(ModelNotFoundError)
+async def model_not_found_handler(request: Request, exc: ModelNotFoundError) -> JSONResponse:
+    """Handle model not found errors.
+    
+    Returns 503 Service Unavailable when model files are missing.
+    """
+    logger.error(
+        "Model not found",
+        extra={
+            "path": str(request.url.path),
+            "method": request.method,
+            "error": str(exc),
+        },
+        exc_info=True,
+    )
+
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={
+            "error": "Model not found",
+            "message": str(exc),
+            "details": "Please train a model first using the training script.",
+        },
+    )
+
+
+@app.exception_handler(UserNotFoundError)
+async def user_not_found_handler(request: Request, exc: UserNotFoundError) -> JSONResponse:
+    """Handle user not found errors.
+    
+    Returns 404 Not Found when user is not in training data.
+    """
+    logger.warning(
+        "User not found",
+        extra={
+            "path": str(request.url.path),
+            "method": request.method,
+            "error": str(exc),
+        }
+    )
+
+    return JSONResponse(
+        status_code=status.HTTP_404_NOT_FOUND,
+        content={
+            "error": "User not found",
+            "message": str(exc),
+            "details": "User not found in training data. Enable cold-start mode for fallback recommendations.",
+        },
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    """Handle FastAPI HTTP exceptions.
+    
+    Provides consistent error format for all HTTP exceptions.
+    """
+    log_level = logging.ERROR if exc.status_code >= 500 else logging.WARNING
+    logger.log(
+        log_level,
+        "HTTP exception",
+        extra={
+            "path": str(request.url.path),
+            "method": request.method,
+            "status_code": exc.status_code,
+            "detail": exc.detail,
+        },
+        exc_info=exc.status_code >= 500,
+    )
+
+    # Handle detail that's already a dict
+    if isinstance(exc.detail, dict):
+        content = exc.detail
+    else:
+        content = {
+            "error": "HTTP error",
+            "message": str(exc.detail),
+            "status_code": exc.status_code,
+        }
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=content,
+    )
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Handle errors.
+    """Handle all unhandled exceptions.
+    
+    Logs full traceback and returns 500 Internal Server Error.
     """
+    # Get full traceback
+    tb_str = traceback.format_exc()
+    
     logger.error(
         "Unhandled exception",
         extra={
@@ -46,6 +138,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
             "method": request.method,
             "error": str(exc),
             "error_type": type(exc).__name__,
+            "traceback": tb_str,
         },
         exc_info=True,
     )
@@ -54,7 +147,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={
             "error": "Internal server error",
-            "message": "An unexpected error occurred",
+            "message": "An unexpected error occurred. Please try again later.",
             "type": type(exc).__name__,
         },
     )
@@ -64,7 +157,9 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 async def validation_exception_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
-    """Handle validation errors.
+    """Handle request validation errors.
+    
+    Returns 422 Unprocessable Entity with validation error details.
     """
     logger.warning(
         "Request validation error",

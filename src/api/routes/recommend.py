@@ -9,13 +9,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 import numpy as np
 
 from src.api.metrics import metrics_service
-from src.recommender.infer import _compute_recommendations, _handle_cold_start_user
+from src.recommender.infer import (
+    _compute_recommendations,
+    _handle_cold_start_user,
+    ModelNotFoundError,
+    UserNotFoundError,
+)
 from src.recommender.utils import check_model_exists, load_model_artifacts
 from src.recommender.hybrid import create_hybrid_recommender
 
@@ -58,6 +63,16 @@ def load_model_if_needed(model_dir: str = DEFAULT_MODEL_DIR) -> Dict:
     """Load model if not already loaded.
     
     Uses a cache so we don't reload every time.
+    
+    Args:
+        model_dir: Directory containing model files
+    
+    Returns:
+        Dictionary with model, user_map, and product_map
+    
+    Raises:
+        ModelNotFoundError: If model files not found
+        HTTPException: If model fails to load
     """
     global _model_cache
 
@@ -68,11 +83,12 @@ def load_model_if_needed(model_dir: str = DEFAULT_MODEL_DIR) -> Dict:
 
     # Check if model exists
     if not check_model_exists(model_dir):
-        logger.error(f"Model not found in {model_dir}")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Model not found in {model_dir}. Please train a model first.",
+        logger.error(
+            "Model not found",
+            extra={"model_dir": model_dir},
+            exc_info=True,
         )
+        raise ModelNotFoundError(model_dir)
 
     # Load model artifacts
     try:
@@ -88,14 +104,36 @@ def load_model_if_needed(model_dir: str = DEFAULT_MODEL_DIR) -> Dict:
         }
         _model_load_timestamp = datetime.utcnow()
 
-        logger.info("Model loaded successfully")
+        logger.info(
+            "Model loaded successfully",
+            extra={
+                "model_dir": model_dir,
+                "num_users": len(user_map),
+                "num_products": len(product_map),
+            }
+        )
         return _model_cache
 
+    except ModelNotFoundError:
+        # Re-raise as-is
+        raise
     except Exception as e:
-        logger.error(f"Failed to load model: {e}", exc_info=True)
+        logger.error(
+            "Failed to load model",
+            extra={
+                "model_dir": model_dir,
+                "error": str(e),
+                "error_type": type(e).__name__,
+            },
+            exc_info=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to load model: {str(e)}",
+            detail={
+                "error": "Failed to load model",
+                "message": str(e),
+                "type": type(e).__name__,
+            }
         )
 
 
@@ -108,10 +146,32 @@ def get_recommendations(
     explain: bool = False,
     cf_weight: float = 0.7,
     content_weight: float = 0.3,
+    allow_cold_start: bool = Query(
+        True,
+        description="If False, return 404 for unknown users instead of cold-start recommendations"
+    ),
 ) -> RecommendationResponse:
     """Get recommendations for a user.
     
     Can use hybrid mode (CF + content) or just CF mode.
+    
+    Args:
+        user_id: User ID to get recommendations for
+        top_n: Number of recommendations to return
+        model_dir: Directory containing model files
+        mode: Recommendation mode ('hybrid' or 'cf')
+        explain: Include score breakdown for explainability
+        cf_weight: Weight for collaborative filtering (hybrid mode only)
+        content_weight: Weight for content-based filtering (hybrid mode only)
+        allow_cold_start: If False, return 404 for unknown users
+    
+    Returns:
+        RecommendationResponse with product IDs and optional scores
+    
+    Raises:
+        HTTPException 404: User not found (if allow_cold_start=False)
+        HTTPException 503: Model not found or unavailable
+        HTTPException 500: Internal server error
     """
     # Check mode
     mode = mode.lower() if mode else "hybrid"
@@ -119,7 +179,15 @@ def get_recommendations(
         logger.warning(f"Invalid mode '{mode}', falling back to 'cf'")
         mode = "cf"
     
-    logger.info(f"Generating recommendations for user {user_id}, top_n={top_n}, mode={mode}")
+    logger.info(
+        "Generating recommendations",
+        extra={
+            "user_id": user_id,
+            "top_n": top_n,
+            "mode": mode,
+            "allow_cold_start": allow_cold_start,
+        }
+    )
 
     # Track timing for metrics
     inference_start = time.time()
@@ -130,6 +198,28 @@ def get_recommendations(
         model = model_artifacts["model"]
         user_map = model_artifacts["user_map"]
         product_map = model_artifacts["product_map"]
+        
+        # Check if user exists
+        user_exists = user_id in user_map
+        
+        if not user_exists and not allow_cold_start:
+            logger.warning(
+                "User not found and cold-start not allowed",
+                extra={
+                    "user_id": user_id,
+                    "allow_cold_start": allow_cold_start,
+                }
+            )
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error": "User not found",
+                    "message": f"User {user_id} not found in training data. "
+                              f"Cannot generate personalized recommendations.",
+                    "user_id": user_id,
+                    "known_user_count": len(user_map),
+                }
+            )
 
         if mode == "hybrid":
             # Use hybrid mode
@@ -246,26 +336,89 @@ def get_recommendations(
     except HTTPException:
         # Re-raise HTTP exceptions as-is
         raise
-    except FileNotFoundError as e:
-        logger.error(f"Model files not found: {e}")
+    except ModelNotFoundError as e:
+        logger.error(
+            "Model not found",
+            extra={
+                "model_dir": model_dir,
+                "error": str(e),
+            },
+            exc_info=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Model not found in {model_dir}. Please train a model first.",
+            detail={
+                "error": "Model not found",
+                "message": str(e),
+                "model_dir": model_dir,
+            }
+        )
+    except UserNotFoundError as e:
+        logger.warning(
+            "User not found in training data",
+            extra={
+                "user_id": user_id,
+                "error": str(e),
+            }
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "User not found",
+                "message": str(e),
+                "user_id": user_id,
+            }
+        )
+    except FileNotFoundError as e:
+        logger.error(
+            "Model files not found",
+            extra={
+                "model_dir": model_dir,
+                "error": str(e),
+            },
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "Model not found",
+                "message": f"Model files not found in {model_dir}. Please train a model first.",
+                "model_dir": model_dir,
+            }
         )
     except ValueError as e:
-        logger.error(f"Invalid input or model error: {e}")
+        logger.error(
+            "Invalid input or model error",
+            extra={
+                "user_id": user_id,
+                "error": str(e),
+            },
+            exc_info=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid request: {str(e)}",
+            detail={
+                "error": "Invalid request",
+                "message": str(e),
+            }
         )
     except Exception as e:
         logger.error(
-            f"Error generating recommendations for user {user_id}: {e}",
+            "Unexpected error generating recommendations",
+            extra={
+                "user_id": user_id,
+                "error": str(e),
+                "error_type": type(e).__name__,
+            },
             exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to generate recommendations: {str(e)}",
+            detail={
+                "error": "Internal server error",
+                "message": f"Failed to generate recommendations: {str(e)}",
+                "type": type(e).__name__,
+            }
         )
 
 

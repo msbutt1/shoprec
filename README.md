@@ -1,5 +1,10 @@
 # ShopRec - Product Recommendation System
 
+![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Last Updated](https://img.shields.io/badge/last%20updated-2026--01--06-lightgrey)
+![Status](https://img.shields.io/badge/status-production--ready-success)
+
 A backend service that powers AI product recommendations for e-commerce platforms. Uses collaborative filtering and content-based filtering to suggest products that users might like.
 
 ## Overview
@@ -33,20 +38,20 @@ The system learns from user purchase history and recommends products based on wh
        ▼
 ┌─────────────────────────────────────────┐
 │          FastAPI Server                 │
-│  ┌─────────────────────────────────┐   │
-│  │  Routes (recommend.py)          │   │
-│  │  - GET /recommend/{user_id}     │   │
-│  │  - GET /ping                    │   │
-│  │  - GET /status                  │   │
-│  └──────────┬──────────────────────┘   │
+│  ┌─────────────────────────────────┐    │
+│  │  Routes (recommend.py)          │    │
+│  │  - GET /recommend/{user_id}     │    │
+│  │  - GET /ping                    │    │
+│  │  - GET /status                  │    │
+│  └──────────┬──────────────────────┘    │
 │             │                           │
-│  ┌──────────▼──────────────────────┐   │
-│  │  Hybrid Recommender             │   │
-│  │  ┌────────────┐  ┌────────────┐ │   │
-│  │  │ CF Model   │  │  Content   │ │   │
-│  │  │   (SVD)    │  │ Embeddings │ │   │
-│  │  └────────────┘  └────────────┘ │   │
-│  └─────────────────────────────────┘   │
+│  ┌──────────▼──────────────────────┐    │
+│  │  Hybrid Recommender             │    │
+│  │  ┌────────────┐  ┌────────────┐ │    │
+│  │  │ CF Model   │  │  Content   │ │    │
+│  │  │   (SVD)    │  │ Embeddings │ │    │
+│  │  └────────────┘  └────────────┘ │    │
+│  └─────────────────────────────────┘    │
 └─────────────────────────────────────────┘
        │
        ▼

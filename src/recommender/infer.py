@@ -11,7 +11,7 @@ import numpy as np
 from scipy.sparse import csr_matrix
 from sklearn.decomposition import TruncatedSVD
 
-from src.recommender.utils import load_model_artifacts
+from src.recommender.utils import load_model_artifacts, check_model_exists
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -21,15 +21,42 @@ DEFAULT_TOP_N = 5
 DEFAULT_MODEL_DIR = "models"
 
 
+class UserNotFoundError(Exception):
+    """Raised when user is not found in training data."""
+    pass
+
+
+class ModelNotFoundError(Exception):
+    """Raised when model files cannot be found."""
+    pass
+
+
 def recommend_products_for_user(
     user_id: int,
     model_path: str = DEFAULT_MODEL_DIR,
     top_n: int = DEFAULT_TOP_N,
     user_product_matrix: Optional[csr_matrix] = None,
+    allow_cold_start: bool = True,
 ) -> List[int]:
     """Get recommendations for a user.
     
     Loads the model and returns top N product recommendations.
+    
+    Args:
+        user_id: User ID to get recommendations for
+        model_path: Path to model directory
+        top_n: Number of recommendations to return
+        user_product_matrix: Optional pre-loaded user-product matrix
+        allow_cold_start: If True, return popular items for unknown users.
+                         If False, raise UserNotFoundError for unknown users.
+    
+    Returns:
+        List of recommended product IDs
+    
+    Raises:
+        ModelNotFoundError: If model files are missing
+        UserNotFoundError: If user not found and allow_cold_start=False
+        Exception: For other unexpected errors
     """
     import time
     
@@ -41,17 +68,59 @@ def recommend_products_for_user(
             "user_id": user_id,
             "top_n": top_n,
             "model_path": model_path,
+            "allow_cold_start": allow_cold_start,
         }
     )
 
     try:
+        # Check if model exists
+        if not check_model_exists(model_path):
+            logger.error(
+                "Model files not found",
+                extra={
+                    "user_id": user_id,
+                    "model_path": model_path,
+                },
+                exc_info=True,
+            )
+            raise ModelNotFoundError(
+                f"Model not found at '{model_path}'. Please train a model first."
+            )
+        
         # Load model artifacts
         load_start = time.time()
-        model, user_id_to_idx, product_id_to_idx = load_model_artifacts(model_path)
+        try:
+            model, user_id_to_idx, product_id_to_idx = load_model_artifacts(model_path)
+        except FileNotFoundError as e:
+            logger.error(
+                "Model files not found during load",
+                extra={
+                    "user_id": user_id,
+                    "model_path": model_path,
+                    "error": str(e),
+                },
+                exc_info=True,
+            )
+            raise ModelNotFoundError(
+                f"Model files missing at '{model_path}': {str(e)}"
+            ) from e
+        except Exception as e:
+            logger.error(
+                "Failed to load model artifacts",
+                extra={
+                    "user_id": user_id,
+                    "model_path": model_path,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                },
+                exc_info=True,
+            )
+            raise Exception(f"Failed to load model: {str(e)}") from e
+        
         load_time = time.time() - load_start
         
         logger.info(
-            "Model loaded",
+            "Model loaded successfully",
             extra={
                 "user_id": user_id,
                 "load_time_ms": round(load_time * 1000, 2),
@@ -62,8 +131,21 @@ def recommend_products_for_user(
 
         # Handle unknown user
         if user_id not in user_id_to_idx:
+            if not allow_cold_start:
+                logger.warning(
+                    "User not found in training data",
+                    extra={
+                        "user_id": user_id,
+                        "num_known_users": len(user_id_to_idx),
+                    }
+                )
+                raise UserNotFoundError(
+                    f"User {user_id} not found in training data. "
+                    f"Known users: {min(user_id_to_idx.keys())} to {max(user_id_to_idx.keys())}"
+                )
+            
             logger.warning(
-                "User not in training data, using cold-start",
+                "User not in training data, using cold-start strategy",
                 extra={
                     "user_id": user_id,
                     "strategy": "cold_start",
@@ -89,7 +171,7 @@ def recommend_products_for_user(
         total_time = time.time() - start_time
 
         logger.info(
-            "Recommendations generated",
+            "Recommendations generated successfully",
             extra={
                 "user_id": user_id,
                 "num_recommendations": len(recommendations),
@@ -100,28 +182,36 @@ def recommend_products_for_user(
 
         return recommendations
 
+    except (ModelNotFoundError, UserNotFoundError):
+        # Re-raise these as-is
+        raise
     except FileNotFoundError as e:
+        # Legacy handling for backwards compatibility
         logger.error(
             "Model files not found",
             extra={
                 "user_id": user_id,
                 "model_path": model_path,
                 "error": str(e),
-            }
+            },
+            exc_info=True,
         )
-        raise
+        raise ModelNotFoundError(
+            f"Model files not found at '{model_path}': {str(e)}"
+        ) from e
     except Exception as e:
         total_time = time.time() - start_time
         logger.error(
-            "Recommendation generation failed",
+            "Recommendation generation failed with unexpected error",
             extra={
                 "user_id": user_id,
                 "error": str(e),
                 "error_type": type(e).__name__,
                 "total_time_ms": round(total_time * 1000, 2),
-            }
+            },
+            exc_info=True,
         )
-        raise ValueError(f"Failed to generate recommendations: {e}") from e
+        raise Exception(f"Failed to generate recommendations: {str(e)}") from e
 
 
 def _compute_recommendations(

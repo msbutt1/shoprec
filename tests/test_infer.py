@@ -81,11 +81,13 @@ def test_recommend_products_for_user_unknown_user_returns_cold_start(trained_mod
 
 
 def test_recommend_products_for_user_missing_model_raises_filenotfounderror(tmp_path):
-    """Test that missing model files raise FileNotFoundError."""
+    """Test that missing model files raise ModelNotFoundError."""
+    from src.recommender.infer import ModelNotFoundError
+    
     user_id = 5
     nonexistent_model_dir = tmp_path / "nonexistent_model"
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(ModelNotFoundError):
         recommend_products_for_user(
             user_id=user_id,
             model_path=str(nonexistent_model_dir),
